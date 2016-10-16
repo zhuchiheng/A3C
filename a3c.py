@@ -15,6 +15,10 @@ def de_list(a):
 
 class A3C:
     def __init__(self, p, v):
+        if (not hasattr(p, "lock")):
+            p.lock = z.Lock()
+        if (not hasattr(v, "lock")):
+            v.lock = z.Lock()
         self.p = p
         self.v = v
         self.t = 0
@@ -87,6 +91,6 @@ class A3C:
         p.train_on_batch(self.p_fake_x, self.p_fake_y)
         v.train_on_batch(self.v_fake_x, self.v_fake_y)
 
-        with self.lock:
+        with self.p.lock, self.v.lock:
             self.p.set_weights(p.get_weights())
             self.v.set_weights(v.get_weights())
