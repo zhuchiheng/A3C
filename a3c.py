@@ -15,10 +15,18 @@ def de_list(a):
 
 class A3C:
     def __init__(self, p, v):
-        if (not hasattr(p, "lock")):
-            p.lock = z.Lock()
-        if (not hasattr(v, "lock")):
-            v.lock = z.Lock()
+        p_has_lock = hasattr(p, "lock")
+        v_has_lock = hasattr(v, "lock")
+        if p_has_lock and not v_has_lock:
+            v.lock = p.lock
+        elif v_has_lock and not p_has_lock:
+            p.lock = v.lock
+        elif p_has_lock and v_has_lock:
+            if p.lock is not v.lock:
+                raise Exception("p.lock is not v.lock")
+        else:
+            p.lock = v.lock = z.Lock()
+
         self.p = p
         self.v = v
         self.t = 0
@@ -30,7 +38,6 @@ class A3C:
                                  for s in to_list(self.p.output_shape)])
         self.v_fake_y = de_list([np.zeros(s)
                                  for s in to_list(self.v.output_shape)])
-        self.lock = z.Lock()
 
     def compile(self, optimizer_p, optimizer_v):
         opt_p = opts.get(optimizer_p)
