@@ -2,6 +2,8 @@ import keras.backend as K
 import numpy as np
 from keras.models import Model
 import keras.optimizers as opts
+
+from multiprocessing import Pool
 import threading as z
 
 
@@ -30,73 +32,56 @@ class A3C:
         self.p = p
         self.v = v
         self.t = 0
-        self.p_fake_x = de_list([np.zeros(s)
-                                 for s in to_list(self.p.input_shape)])
-        self.v_fake_x = de_list([np.zeros(s)
-                                 for s in to_list(self.v.input_shape)])
-        self.p_fake_y = de_list([np.zeros(s)
-                                 for s in to_list(self.p.output_shape)])
-        self.v_fake_y = de_list([np.zeros(s)
-                                 for s in to_list(self.v.output_shape)])
+        self.pool = Pool()
 
     def compile(self, optimizer_p, optimizer_v):
         opt_p = opts.get(optimizer_p)
         opt_v = opts.get(optimizer_v)
 
-        def get_gradients(s, _1, _2):
-            return s.grads
+        def loss_p(diff_r_v, a):
+            return K.mean(K.log(a) * diff_r_v, -1)
 
-        def loss(_1, _2):
-            return 0
+        self.p.compile(optimizer=opt_p, loss=loss_p)
+        self.v.compile(optimizer=opt_v, loss='mse')
 
-        opt_p.get_gradients = get_gradients
-        opt_v.get_gradients = get_gradients
-        self.p.compile(optimizer=opt_p, loss=loss)
-        self.v.compile(optimizer=opt_v, loss=loss)
-
-    def thread_step(self, env, gm=0.9, t_max=np.inf):
-        d_th_p = [np.zeros(w.shape)
-                  for w in self.p.trainable_weights]
-        d_th_v = [np.zeros(w.shape)
-                  for w in self.v.trainable_weights]
+    def thread_step(self, env, gamma=0.9, t_max=np.inf, **kargs):
         p = Model.from_config(self.p.get_config())
         v = Model.from_config(self.v.get_config())
         p.set_weights(self.p.get_weights())
         v.set_weights(self.v.get_weights())
 
-        h = []
-
+        h_s, h_R = [], []
         t = 0
+        R = np.array([0])
         done = False
         s = env.reset()
         while (not done) or (t < t_max):
             a = p.predict(s)
-            s, r, done, info = env.step(a)
-            h.append((s, a, r))
+            s_next, r, done, info = env.step(a)
+            R = r + gamma * R
+            h_s.append(s)
+            h_R.append(R)
+            s = s_next
             t += 1
         self.t += t
 
-        R = 0 if done else v.predict(s)
+        ss = [np.concatenate(h, axis=0) for h in h_s]
+        RR = np.concatenate(h_R, axis=0)
 
-        x = K.placeholder(shape=(1,))
-        dd_p = [
-            [K.gradients(K.sum(K.log(aa)), w)
-             for aa in p.outputs]
-            for w in p.trainable_weights]
-        dd_v = [
-            K.gradients((x - v.outputs[0])**2, w)
-            for w in p.trainable_weights]
-        for s, a, r in h:
-            R = r + gm * R
-            RR = R - v.predict(s)
-            d_th_p = [w + sum(dd) * RR
-                      for dd, w in zip(dd_p, d_th_p)]
-            d_th_v = [w + dd_v * R for w in d_th_v]
+        if done:
+            RR += v.predict(s) ** np.cumsum(np.ones(RR.shape))
 
-        self.p.optimizer.grads = d_th_p
-        self.v.optimizer.grads = d_th_v
-        p.train_on_batch(self.p_fake_x, self.p_fake_y)
-        v.train_on_batch(self.v_fake_x, self.v_fake_y)
+        diff_RR = RR - v.predict(ss)
+        diff_RRs = []
+        for sh in p.output_shapes:
+            tmp = diff_RR
+            for _ in range(len(sh)-1):
+                tmp = np.expand_dims(tmp, axis=-1)
+            diff_RRs.append(tmp)
+
+        self.pool.pmap(
+            lambda z, b: z.fit(ss, b, **kargs),
+            [(p, diff_RRs), (v, RR)])
 
         with self.p.lock, self.v.lock:
             self.p.set_weights(p.get_weights())
