@@ -105,6 +105,18 @@ class A3C:
                 [(p, diff_RRs), (v, RR)])
 
     def train_env(self, T_max, env, gamma=0.9, t_max=np.inf, **kargs):
+        """
+        Training A3C
+
+        T_max: max num of episodes.
+        env: similiar to openai gym but only `env.step` method has
+            to be implemeted. The observations and actions of `env.step` must
+            be compitable with keras inputs and outputs.
+        gamma: discount factor of rewards per unit time delay between
+            current and next observations.
+        t_max: max num of steps per episode.
+        **kargs: pass extra parameters to keras model.fit function.
+        """
         # async training steps
         def fff(i):
             while self.T < T_max:
