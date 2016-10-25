@@ -12,7 +12,7 @@ def to_list(a):
 
 
 def de_list(a):
-    return a[0] if len(a) == 1 else a
+    return a[0] if type(a) is list and len(a) == 1 else a
 
 
 class A3C:
@@ -62,47 +62,48 @@ class A3C:
         h_s, h_r, h_g = [], [], []
         t = 0
         done = False
-        s = env.reset()
+        s = to_list(env.reset())
         while (not done) or (t < t_max):
-            a = p.predict(s)
-            s_next, r, done, info = env.step(a)
+            a = p.predict(de_list(s))
+            s_next, r, done, info = env.step(to_list(a))
             # `g` generalized gamma which makes bellman's equaltion applies to
             # hetergenous time delay.
             g = gamma ** (info['time'] if 'time' in info.keys() else 1)
             h_s.append(s)
             h_r.append(r)
             h_g.append(g)
-            s = s_next
+            s = to_list(s_next)
             t += 1
         self.T += t
 
         # summing gradients is vectorized, It looks not like what's in original
         # paper, but it produces the same result.
-        h_g.append(1)
-        ss = zip(*[np.concatenate(z, axis=0) for z in zip(*h_s)])
+        h_g.append(1.0)
+        ss = de_list([np.concatenate(z, axis=0)
+                      for z in zip(*h_s)])
         rr = np.array(h_r)
         gg = np.array(h_g)
         RR = np.cumsum(rr * gg[1:])
+        vv = v.predict(ss).flatten()
         if not done:
-            RR += v.predict(s) ** np.cumprod(gg[:-1])
+            RR += vv[-1:] ** np.cumprod(gg[:-1])
 
         # In order to broadcast to actions' shape for training,
         # expanding dims is needed.
-        diff_RR = RR - v.predict(ss)
+        diff_RR = RR - vv
         diff_RRs = []
-        for sh in p.output_shapes:
+        for sh in p.output_shape:
             tmp = diff_RR
-            for _ in range(len(sh)-1):
+            while tmp.ndim < len(sh):
                 tmp = np.expand_dims(tmp, axis=-1)
             diff_RRs.append(tmp)
 
         # parallel training with lock
-        def fff(z, b):
-            z.fit(ss, b, **kargs)
+        def fff(nn, target):
+            nn.fit(ss, target, **kargs)
         with self.lock:
             self.pool.map(
-                fff,
-                [(p, diff_RRs), (v, RR)])
+                fff, [(p, diff_RRs), (v, RR)])
 
     def train_env(self, T_max, env, gamma=0.9, t_max=np.inf, **kargs):
         """
@@ -112,6 +113,9 @@ class A3C:
         env: similiar to openai gym but only `env.step` method has
             to be implemeted. The observations and actions of `env.step` must
             be compitable with keras inputs and outputs.
+
+            Notice: actions are preprocessed into a list of nd-array(s) before
+                `env.step` applying for convenient.
         gamma: discount factor of rewards per unit time delay between
             current and next observations.
         t_max: max num of steps per episode.
