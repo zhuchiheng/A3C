@@ -3,6 +3,7 @@ import numpy as np
 from keras.models import Model
 
 from multiprocessing import Pool
+from multiprocessing import cpu_count
 import threading as z
 
 
@@ -34,10 +35,11 @@ class A3C:
         else:
             p.lock = v.lock = z.Lock()
 
+        self.lock = p.lock
         self.p = p
         self.v = v
         self.T = 0
-        self.pool = Pool()
+        self.pool = Pool(cpu_count())
 
     def compile(self, optimizer):
         """compiles keras models, with keras optimizer"""
@@ -48,7 +50,7 @@ class A3C:
         self.p.compile(optimizer=optimizer, loss=loss_p)
         self.v.compile(optimizer=optimizer, loss='mse')
 
-    def thread_step(self, env, gamma=0.9, t_max=np.inf, **kargs):
+    def one_episode(self, env, gamma, t_max, **kargs):
         # clone models for async training
         p = Model.from_config(self.p.get_config())
         v = Model.from_config(self.v.get_config())
@@ -95,7 +97,17 @@ class A3C:
             diff_RRs.append(tmp)
 
         # parallel training with lock
-        with self.p.lock, self.v.lock:
-            self.pool.pmap(
-                lambda z, b: z.fit(ss, b, **kargs),
+        def fff(z, b):
+            z.fit(ss, b, **kargs)
+        with self.lock:
+            self.pool.map(
+                fff,
                 [(p, diff_RRs), (v, RR)])
+
+    def train_env(self, T_max, env, gamma=0.9, t_max=np.inf, **kargs):
+        # async training steps
+        def fff(i):
+            while self.T < T_max:
+                self.one_episode(
+                    env=env, gamma=gamma, t_max=t_max, **kargs)
+        self.pool.map_async(fff, range(cpu_count()))
