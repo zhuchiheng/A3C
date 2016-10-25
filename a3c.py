@@ -1,7 +1,6 @@
 import keras.backend as K
 import numpy as np
 from keras.models import Model
-import keras.optimizers as opts
 
 from multiprocessing import Pool
 import threading as z
@@ -17,6 +16,12 @@ def de_list(a):
 
 class A3C:
     def __init__(self, p, v):
+        """
+        Reinforcement learning, asynchronous advantage actor-critic
+
+        p: keras NN of policy
+        v: keras NN of value prediction.
+        """
         p_has_lock = hasattr(p, "lock")
         v_has_lock = hasattr(v, "lock")
         if p_has_lock and not v_has_lock:
@@ -31,46 +36,56 @@ class A3C:
 
         self.p = p
         self.v = v
-        self.t = 0
+        self.T = 0
         self.pool = Pool()
 
-    def compile(self, optimizer_p, optimizer_v):
-        opt_p = opts.get(optimizer_p)
-        opt_v = opts.get(optimizer_v)
+    def compile(self, optimizer):
+        """compiles keras models, with keras optimizer"""
 
         def loss_p(diff_r_v, a):
             return K.mean(K.log(a) * diff_r_v, -1)
 
-        self.p.compile(optimizer=opt_p, loss=loss_p)
-        self.v.compile(optimizer=opt_v, loss='mse')
+        self.p.compile(optimizer=optimizer, loss=loss_p)
+        self.v.compile(optimizer=optimizer, loss='mse')
 
     def thread_step(self, env, gamma=0.9, t_max=np.inf, **kargs):
+        # clone models for async training
         p = Model.from_config(self.p.get_config())
         v = Model.from_config(self.v.get_config())
         p.set_weights(self.p.get_weights())
         v.set_weights(self.v.get_weights())
 
-        h_s, h_R = [], []
+        # loop of states->acts, `env.step` should be compatible with keras'
+        # inputs.
+        h_s, h_r, h_g = [], [], []
         t = 0
-        R = np.array([0])
         done = False
         s = env.reset()
         while (not done) or (t < t_max):
             a = p.predict(s)
             s_next, r, done, info = env.step(a)
-            R = r + gamma * R
+            # `g` generalized gamma which makes bellman's equaltion applies to
+            # hetergenous time delay.
+            g = gamma ** (info['time'] if 'time' in info.keys() else 1)
             h_s.append(s)
-            h_R.append(R)
+            h_r.append(r)
+            h_g.append(g)
             s = s_next
             t += 1
-        self.t += t
+        self.T += t
 
-        ss = [np.concatenate(h, axis=0) for h in h_s]
-        RR = np.concatenate(h_R, axis=0)
+        # summing gradients is vectorized, It looks not like what's in original
+        # paper, but it produces the same result.
+        h_g.append(1)
+        ss = zip(*[np.concatenate(z, axis=0) for z in zip(*h_s)])
+        rr = np.array(h_r)
+        gg = np.array(h_g)
+        RR = np.cumsum(rr * gg[1:])
+        if not done:
+            RR += v.predict(s) ** np.cumprod(gg[:-1])
 
-        if done:
-            RR += v.predict(s) ** np.cumsum(np.ones(RR.shape))
-
+        # In order to broadcast to actions' shape for training,
+        # expanding dims is needed.
         diff_RR = RR - v.predict(ss)
         diff_RRs = []
         for sh in p.output_shapes:
@@ -79,10 +94,8 @@ class A3C:
                 tmp = np.expand_dims(tmp, axis=-1)
             diff_RRs.append(tmp)
 
-        self.pool.pmap(
-            lambda z, b: z.fit(ss, b, **kargs),
-            [(p, diff_RRs), (v, RR)])
-
+        # parallel training with lock
         with self.p.lock, self.v.lock:
-            self.p.set_weights(p.get_weights())
-            self.v.set_weights(v.get_weights())
+            self.pool.pmap(
+                lambda z, b: z.fit(ss, b, **kargs),
+                [(p, diff_RRs), (v, RR)])
