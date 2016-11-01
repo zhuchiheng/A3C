@@ -54,8 +54,10 @@ class A3C:
         # clone models for async training
         p = Model.from_config(self.p.get_config())
         v = Model.from_config(self.v.get_config())
-        p.set_weights(self.p.get_weights())
-        v.set_weights(self.v.get_weights())
+        p_w0 = self.p.get_weights()
+        v_w0 = self.v.get_weights()
+        p.set_weights(p_w0)
+        v.set_weights(v_w0)
 
         # loop of states->acts, `env.step` should be compatible with keras'
         # inputs.
@@ -101,9 +103,22 @@ class A3C:
         # parallel training with lock
         def fff(nn, target):
             nn.fit(ss, target, **kargs)
+        self.pool.map_async(
+            fff, [(p, diff_RRs),
+                  (v, RR)])
+
+        # update_weights with lock
+        def ggg(nn, new_nn, nn_w0):
+            nn_w = nn.get_weights()
+            new_nn_w = new_nn.get_weights()
+            assert not (nn_w0[0] is new_nn_w[0])
+            nn.set_weights([
+                w + (w1 - w0) for w, w0, w1 in
+                zip(nn_w, nn_w0, new_nn_w)])
         with self.lock:
-            self.pool.map(
-                fff, [(p, diff_RRs), (v, RR)])
+            self.pool.map_async(
+                ggg, [(self.p, p, p_w0),
+                      (self.v, v, v_w0)])
 
     def train_env(self, T_max, env, gamma=0.9, t_max=np.inf, **kargs):
         """
