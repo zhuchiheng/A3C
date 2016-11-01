@@ -16,13 +16,19 @@ def de_list(a):
 
 
 class A3C:
-    def __init__(self, p, v):
+    def __init__(self, p, v, recurrent=False, continuous=False):
         """
         Reinforcement learning, asynchronous advantage actor-critic
 
         p: keras NN of policy
         v: keras NN of value prediction.
+        recurrent: boolean, this requires dim of inputs and outputs has
+            timestep's dim, like (n_batch, n_timestep, ...).
+        continuous: boolean, continuous actions or not
         """
+
+        assert (not self.recurrent) or (p.stateful and v.stateful)
+
         p_has_lock = hasattr(p, "lock")
         v_has_lock = hasattr(v, "lock")
         if p_has_lock and not v_has_lock:
@@ -38,6 +44,8 @@ class A3C:
         self.lock = p.lock
         self.p = p
         self.v = v
+        self.recurrent = recurrent
+        self.continuous = continuous
         self.T = 0
         self.pool = Pool(cpu_count())
 
@@ -45,7 +53,8 @@ class A3C:
         """compiles keras models, with keras optimizer"""
 
         def loss_p(diff_r_v, a):
-            return K.mean(K.log(a) * diff_r_v, -1)
+            term = a if self.continuous else K.log(a)
+            return K.mean(term * diff_r_v, axis=-1)
 
         self.p.compile(optimizer=optimizer, loss=loss_p)
         self.v.compile(optimizer=optimizer, loss='mse')
@@ -66,8 +75,10 @@ class A3C:
         done = False
         s = to_list(env.reset())
         while (not done) or (t < t_max):
-            a = p.predict(de_list(s))
-            s_next, r, done, info = env.step(to_list(a))
+            a = p.predict(de_list(
+                [np.expand_dims(z, 0)for z in s] if self.recurrent else s))
+            s_next, r, done, info = env.step(to_list(
+                [z[-1] for z in a] if self.recurrent else a))
             # `g` generalized gamma which makes bellman's equaltion applies to
             # hetergenous time delay.
             g = gamma ** (info['time'] if 'time' in info.keys() else 1)
@@ -78,33 +89,38 @@ class A3C:
             t += 1
         self.T += t
 
-        # summing gradients is vectorized, It looks not like what's in original
-        # paper, but it produces the same result.
-        h_g.append(1.0)
-        ss = de_list([np.concatenate(z, axis=0)
-                      for z in zip(*h_s)])
-        rr = np.array(h_r)
-        gg = np.array(h_g)
-        RR = np.cumsum(rr * gg[1:])
-        vv = v.predict(ss).flatten()
-        if not done:
-            RR += vv[-1:] ** np.cumprod(gg[:-1])
+        R = 0 if done else v.predict(de_list(
+            [np.expand_dims(z, 0)for z in s])).flatten()[-1]
+
+        # summing gradients
+        h_R = []
+        for g, r in zip(h_g, h_r)[::-1]:
+            h_R.append(r + g * R)
+        h_R = h_R[::-1]
+
+        ss = [np.concatenate(z, axis=0) for z in zip(*h_s)]
+        RR = np.reshape(np.array(h_R), (-1, 1))
+        if self.recurrent:
+            ss = [np.expand_dims(z, 0) for z in ss]
+            RR = np.expand_dims(RR, 0)
+
+        vv = v.predict(ss)
+        diff_RR = RR - vv
 
         # In order to broadcast to actions' shape for training,
         # expanding dims is needed.
-        diff_RR = RR - vv
-        diff_RRs = []
+        diff_RR_b = []
         for sh in p.output_shape:
             tmp = diff_RR
             while tmp.ndim < len(sh):
                 tmp = np.expand_dims(tmp, axis=-1)
-            diff_RRs.append(tmp)
+            diff_RR_b.append(tmp)
 
         # parallel training with lock
         def fff(nn, target):
-            nn.fit(ss, target, **kargs)
+            nn.fit(de_list(ss), target, **kargs)
         self.pool.map_async(
-            fff, [(p, diff_RRs),
+            fff, [(p, diff_RR_b),
                   (v, RR)])
 
         # update_weights with lock
