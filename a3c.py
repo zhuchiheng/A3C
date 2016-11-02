@@ -67,6 +67,8 @@ class A3C:
         v_w0 = self.v.get_weights()
         p.set_weights(p_w0)
         v.set_weights(v_w0)
+        p.reset_states()
+        v.reset_states()
 
         # loop of states->acts, `env.step` should be compatible with keras'
         # inputs.
@@ -94,7 +96,7 @@ class A3C:
 
         # summing gradients
         h_R = []
-        for g, r in zip(h_g, h_r)[::-1]:
+        for g, r in zip(h_g[::-1], h_r[::-1]):
             h_R.append(r + g * R)
         h_R = h_R[::-1]
 
@@ -107,20 +109,11 @@ class A3C:
         vv = v.predict(ss)
         diff_RR = RR - vv
 
-        # In order to broadcast to actions' shape for training,
-        # expanding dims is needed.
-        diff_RR_b = []
-        for sh in p.output_shape:
-            tmp = diff_RR
-            while tmp.ndim < len(sh):
-                tmp = np.expand_dims(tmp, axis=-1)
-            diff_RR_b.append(tmp)
-
         # parallel training with lock
         def fff(nn, target):
             nn.fit(de_list(ss), target, **kargs)
         self.pool.map_async(
-            fff, [(p, diff_RR_b),
+            fff, [(p, diff_RR),
                   (v, RR)])
 
         # update_weights with lock
