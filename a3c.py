@@ -7,14 +7,6 @@ from multiprocessing import cpu_count
 import threading as z
 
 
-def to_list(a):
-    return a if type(a) is list else [a]
-
-
-def de_list(a):
-    return a[0] if type(a) is list and len(a) == 1 else a
-
-
 class A3C:
     def __init__(self, p, v, recurrent=False, continuous=False):
         """
@@ -75,24 +67,24 @@ class A3C:
         h_s, h_r, h_g = [], [], []
         t = 0
         done = False
-        s = to_list(env.reset())
+        s = env.reset()
         while (not done) or (t < t_max):
-            a = p.predict(de_list(
-                [np.expand_dims(z, 0)for z in s] if self.recurrent else s))
-            s_next, r, done, info = env.step(to_list(
-                [z[-1] for z in a] if self.recurrent else a))
+            a = p.predict(
+                [np.expand_dims(z, 0)for z in s] if self.recurrent else s)
+            s_next, r, done, info = env.step(
+                [z[-1] for z in a] if self.recurrent else a)
             # `g` generalized gamma which makes bellman's equaltion applies to
             # hetergenous time delay.
             g = gamma ** (info['time'] if 'time' in info.keys() else 1)
             h_s.append(s)
             h_r.append(r)
             h_g.append(g)
-            s = to_list(s_next)
+            s = s_next
             t += 1
         self.T += t
 
-        R = 0 if done else v.predict(de_list(
-            [np.expand_dims(z, 0)for z in s])).flatten()[-1]
+        R = 0 if done else v.predict(
+            [np.expand_dims(z, 0)for z in s]).flatten()[-1]
 
         # summing gradients
         h_R = []
@@ -100,7 +92,10 @@ class A3C:
             h_R.append(r + g * R)
         h_R = h_R[::-1]
 
-        ss = [np.concatenate(z, axis=0) for z in zip(*h_s)]
+        if h_s[0] is list:
+            ss = [np.concatenate(z, axis=0) for z in zip(*h_s)]
+        else:
+            ss = np.concatenate(h_s, axis=0)
         RR = np.reshape(np.array(h_R), (-1, 1))
         if self.recurrent:
             ss = [np.expand_dims(z, 0) for z in ss]
@@ -111,13 +106,13 @@ class A3C:
 
         # parallel training with lock
         def fff(nn, target):
-            nn.fit(de_list(ss), target, **kargs)
+            nn.fit(ss, target, **kargs)
         self.pool.map_async(
             fff, [(p, diff_RR),
                   (v, RR)])
 
         # update_weights with lock
-        def ggg(nn, new_nn, nn_w0):
+        def ggg(nn, nn_w0, new_nn):
             nn_w = nn.get_weights()
             new_nn_w = new_nn.get_weights()
             assert not (nn_w0[0] is new_nn_w[0])
@@ -126,8 +121,8 @@ class A3C:
                 zip(nn_w, nn_w0, new_nn_w)])
         with self.lock:
             self.pool.map_async(
-                ggg, [(self.p, p, p_w0),
-                      (self.v, v, v_w0)])
+                ggg, [(self.p, p_w0, p),
+                      (self.v, v_w0, v)])
 
     def train_env(self, T_max, env, gamma=0.9, t_max=np.inf, **kargs):
         """
@@ -137,9 +132,6 @@ class A3C:
         env: similiar to openai gym but only `env.step` method has
             to be implemeted. The observations and actions of `env.step` must
             be compitable with keras inputs and outputs.
-
-            Notice: actions are preprocessed into a list of nd-array(s) before
-                `env.step` applying for convenient.
         gamma: discount factor of rewards per unit time delay between
             current and next observations.
         t_max: max num of steps per episode.
