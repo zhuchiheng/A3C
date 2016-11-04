@@ -41,12 +41,20 @@ class A3C:
         self.T = 0
         self.pool = Pool(cpu_count())
 
-    def compile(self, optimizer):
-        """compiles keras models, with keras optimizer"""
+    def compile(self, optimizer, beta):
+        """
+        compiles keras models, with keras optimizer.
+
+        `optimizer`: keras optimizer
+        `beta`: control parameter of entropy.
+        """
 
         def loss_p(diff_r_v, a):
-            term = a if self.continuous else K.log(a)
-            return K.mean(term * diff_r_v, axis=-1)
+            c = self.continuous
+            term = a if c else K.log(a)
+            p, v, pi = K.sum(a, axis=-2)/K.sum(a), K.var(a), np.pi
+            entropy = -(K.log(2*pi*v)+1)/2 if c else -K.sum(p*K.log(p))
+            return K.mean(term * diff_r_v, axis=-1) + beta * entropy
 
         self.p.compile(optimizer=optimizer, loss=loss_p)
         self.v.compile(optimizer=optimizer, loss='mse')
@@ -69,10 +77,11 @@ class A3C:
         done = False
         s = env.reset()
         while (not done) or (t < t_max):
-            a = p.predict(
-                [np.expand_dims(z, 0)for z in s] if self.recurrent else s)
-            s_next, r, done, info = env.step(
-                [z[-1] for z in a] if self.recurrent else a)
+            a = p.predict(np.reshape(s, (1, 1, -1)) if self.recurrent
+                          else np.reshape(s, (1, -1)))
+            a = a[-1, -1] if self.recurrent else a[-1]
+            a = a if self.continuous else np.argmax(a, axis=-1)
+            s_next, r, done, info = env.step(a)
             # `g` generalized gamma which makes bellman's equaltion applies to
             # hetergenous time delay.
             g = gamma ** (info['time'] if 'time' in info.keys() else 1)
