@@ -2,8 +2,7 @@ import keras.backend as K
 import numpy as np
 from keras.models import Model
 
-from multiprocessing import Pool
-from multiprocessing import cpu_count
+from multiprocessing import Pool, cpu_count
 import threading as z
 
 
@@ -41,7 +40,7 @@ class A3C:
         self.T = 0
         self.pool = Pool(cpu_count())
 
-    def compile(self, optimizer, beta):
+    def compile(self, optimizer, beta=1.0):
         """
         compiles keras models, with keras optimizer.
 
@@ -80,8 +79,8 @@ class A3C:
             a = p.predict(np.reshape(s, (1, 1, -1)) if self.recurrent
                           else np.reshape(s, (1, -1)))
             a = a[-1, -1] if self.recurrent else a[-1]
-            a = a if self.continuous else np.argmax(a, axis=-1)
-            s_next, r, done, info = env.step(a)
+            s_next, r, done, info = env.step(
+                a if self.continuous else np.argmax(a, axis=-1))
             # `g` generalized gamma which makes bellman's equaltion applies to
             # hetergenous time delay.
             g = gamma ** (info['time'] if 'time' in info.keys() else 1)
@@ -93,7 +92,8 @@ class A3C:
         self.T += t
 
         R = 0 if done else v.predict(
-            [np.expand_dims(z, 0)for z in s]).flatten()[-1]
+            np.reshape(s, (1, 1, -1)) if self.recurrent
+            else np.reshape(s, (1, -1))).flatten()[-1]
 
         # summing gradients
         h_R = []
@@ -101,14 +101,11 @@ class A3C:
             h_R.append(r + g * R)
         h_R = h_R[::-1]
 
-        if h_s[0] is list:
-            ss = [np.concatenate(z, axis=0) for z in zip(*h_s)]
-        else:
-            ss = np.concatenate(h_s, axis=0)
-        RR = np.reshape(np.array(h_R), (-1, 1))
+        ss = np.vstack(h_s)
+        RR = np.vstack(h_R)
         if self.recurrent:
-            ss = [np.expand_dims(z, 0) for z in ss]
-            RR = np.expand_dims(RR, 0)
+            ss = np.expand_dims(ss, axis=0)
+            RR = np.expand_dims(RR, axis=0)
 
         vv = v.predict(ss)
         diff_RR = RR - vv
