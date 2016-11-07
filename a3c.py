@@ -66,8 +66,12 @@ class A3C:
         v_w0 = self.v.get_weights()
         p.set_weights(p_w0)
         v.set_weights(v_w0)
-        p.reset_states()
-        v.reset_states()
+
+        # load nn's internal states for simulation
+        p_v_s0 = [a.get_value() for a, _ in
+                  self.p.state_updates + self.v.state_updates]
+        for (a, _), b in zip(p.state_updates+v.state_updates, p_v_s0):
+            a.set_value(b)
 
         # loop of states->acts, `env.step` should be compatible with keras'
         # inputs.
@@ -90,6 +94,10 @@ class A3C:
             s = s_next
             t += 1
         self.T += t
+
+        # load nn's internal states for training
+        for (a, _), b in zip(p.state_updates+v.state_updates, p_v_s0):
+            a.set_value(b)
 
         R = 0 if done else v.predict(
             np.reshape(s, (1, 1, -1)) if self.recurrent
