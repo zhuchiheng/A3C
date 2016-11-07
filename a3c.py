@@ -62,8 +62,9 @@ class A3C:
         # clone models for async training
         p = Model.from_config(self.p.get_config())
         v = Model.from_config(self.v.get_config())
-        p_w0 = self.p.get_weights()
-        v_w0 = self.v.get_weights()
+        with self.lock:
+            p_w0 = self.p.get_weights()
+            v_w0 = self.v.get_weights()
         p.set_weights(p_w0)
         v.set_weights(v_w0)
 
